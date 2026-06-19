@@ -27,19 +27,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest,    alpine_arch: x86_64,  out: obabel_linux_amd64 }
-          - { runner: ubuntu-24.04-arm, alpine_arch: aarch64, out: obabel_linux_aarch64 }
+          - { runner: ubuntu-latest, alpine_arch: x86_64,  qemu: false, out: obabel_linux_amd64 }
+          - { runner: ubuntu-latest, alpine_arch: aarch64, qemu: true,  out: obabel_linux_aarch64 }
     steps:
       - uses: actions/checkout@v4
 
+      # setup-alpine only runs on an x86_64 host; non-x86 arches are emulated via
+      # QEMU binfmt, which must be registered first (the aarch64 apk/gcc then run
+      # transparently under emulation).
+      - if: ${{ matrix.qemu }}
+        uses: docker/setup-qemu-action@v3
+
       # Alpine chroot on the host runner: actions/checkout runs on the host (glibc),
-      # the build runs in musl. setup-alpine defaults to x86_64, so the arch must be
-      # set explicitly or the arm runner tries to exec an x86_64 apk. Native — no QEMU.
+      # the build runs in musl. Pin to v3.20, which ships CMake 3.29 (pre-4.0) so
+      # OB 3.1.1's old cmake_minimum_required still works — no policy hacks needed.
       - uses: jirutka/setup-alpine@v1
         with:
           arch: ${{ matrix.alpine_arch }}
-          # Alpine 3.20 ships CMake 3.29 (pre-4.0), so OB 3.1.1's old
-          # cmake_minimum_required still works here — no version pin needed.
+          branch: v3.20
           packages: build-base cmake make git eigen-dev
 
       - name: Configure & build
@@ -54,6 +59,7 @@ jobs:
             -DPYTHON_BINDINGS=OFF \
             -DWITH_MAEPARSER=OFF \
             -DWITH_COORDGEN=OFF \
+            -DPTHREAD_LIBRARY=pthread \
             -DCMAKE_EXE_LINKER_FLAGS="-static"
           cmake --build build --target obabel -j"$(nproc)"
           strip build/bin/obabel
@@ -115,7 +121,8 @@ jobs:
             -DWITH_COORDGEN=OFF \
             -DEIGEN3_INCLUDE_DIR="$(brew --prefix eigen)/include/eigen3" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+            -DPTHREAD_LIBRARY=pthread   # macOS keeps pthread in libSystem; find_library is NOTFOUND otherwise
           cmake --build build --target obabel -j"$(sysctl -n hw.ncpu)"
           strip build/bin/obabel
 
@@ -178,6 +185,7 @@ jobs:
             -DWITH_MAEPARSER=OFF `
             -DWITH_COORDGEN=OFF `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DCMAKE_CXX_FLAGS="/std:c++14 /D_HAS_DEPRECATED_ADAPTOR_TYPEDEFS=1 /D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build --target obabel
 
