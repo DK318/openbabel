@@ -38,7 +38,9 @@ jobs:
       - uses: jirutka/setup-alpine@v1
         with:
           arch: ${{ matrix.alpine_arch }}
-          packages: build-base cmake make git eigen-dev boost-dev boost-static
+          # Alpine 3.20 ships CMake 3.29 (pre-4.0), so OB 3.1.1's old
+          # cmake_minimum_required still works here — no version pin needed.
+          packages: build-base cmake make git eigen-dev
 
       - name: Configure & build
         shell: alpine.sh {0}
@@ -50,7 +52,8 @@ jobs:
             -DBUILD_GUI=OFF \
             -DRUN_SWIG=OFF \
             -DPYTHON_BINDINGS=OFF \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_MAEPARSER=OFF \
+            -DWITH_COORDGEN=OFF \
             -DCMAKE_EXE_LINKER_FLAGS="-static"
           cmake --build build --target obabel -j"$(nproc)"
           strip build/bin/obabel
@@ -85,13 +88,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-13, arch: x86_64, out: obabel_macos_amd64 }   # Intel
-          - { runner: macos-14, arch: arm64,  out: obabel_macos_arm64 }   # Apple Silicon
+          - { runner: macos-15-intel, arch: x86_64, out: obabel_macos_amd64 }   # Intel
+          - { runner: macos-14,       arch: arm64,  out: obabel_macos_arm64 }   # Apple Silicon
     steps:
       - uses: actions/checkout@v4
 
+      # The runner ships CMake 4.x, which rejects OB 3.1.1's old
+      # cmake_minimum_required (and cmake_policy VERSION). Pin the last 3.x.
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
       - name: Install deps
-        run: brew install eigen boost   # cmake is preinstalled on the runner
+        run: brew install eigen   # header-only; maeparser/coordgen are off, so Boost isn't needed
 
       - name: Configure & build
         run: |
@@ -102,7 +111,8 @@ jobs:
             -DBUILD_GUI=OFF \
             -DRUN_SWIG=OFF \
             -DPYTHON_BINDINGS=OFF \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_MAEPARSER=OFF \
+            -DWITH_COORDGEN=OFF \
             -DEIGEN3_INCLUDE_DIR="$(brew --prefix eigen)/include/eigen3" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
@@ -137,6 +147,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The runner ships CMake 4.x, which rejects OB 3.1.1's old
+      # cmake_minimum_required (and breaks vcpkg.cmake). Pin the last 3.x.
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
       - name: Install Eigen (vcpkg)
         run: vcpkg install eigen3:x64-windows
         shell: pwsh
@@ -159,7 +175,8 @@ jobs:
             -DBUILD_GUI=OFF `
             -DRUN_SWIG=OFF `
             -DPYTHON_BINDINGS=OFF `
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+            -DWITH_MAEPARSER=OFF `
+            -DWITH_COORDGEN=OFF `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build --target obabel
