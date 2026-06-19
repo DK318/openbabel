@@ -10,6 +10,9 @@
 # gone (so MSVC needs no source patching). What remains:
 #   * maeparser/coordgen default ON and pull in zlib — disabled, not needed for
 #     XYZ->SDF / InChIKey.
+#   * InChI in a static build is gated on WITH_STATIC_INCHI (NOT WITH_INCHI, which
+#     only applies to shared builds). It also force-registers the format so the
+#     linker can't drop it — without it the binary has no inchi/inchikey at all.
 #   * tools/CMakeLists.txt does find_library(pthread): fine on Linux (musl ships a
 #     libpthread.a stub) but NOTFOUND on macOS, so macOS uses -DBUILD_MIXED=ON to
 #     link the proper Threads::Threads target instead.
@@ -54,7 +57,7 @@ jobs:
         with:
           arch: ${{ matrix.alpine_arch }}
           branch: v3.20
-          packages: build-base cmake make git eigen-dev
+          packages: build-base cmake make git eigen-dev perl
 
       - name: Configure & build
         shell: alpine.sh {0}
@@ -63,6 +66,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED=OFF \
             -DWITH_INCHI=ON \
+            -DWITH_STATIC_INCHI=ON \
             -DBUILD_GUI=OFF \
             -DRUN_SWIG=OFF \
             -DPYTHON_BINDINGS=OFF \
@@ -120,6 +124,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED=OFF \
             -DWITH_INCHI=ON \
+            -DWITH_STATIC_INCHI=ON \
             -DBUILD_GUI=OFF \
             -DRUN_SWIG=OFF \
             -DPYTHON_BINDINGS=OFF \
@@ -184,6 +189,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_SHARED=OFF `
             -DWITH_INCHI=ON `
+            -DWITH_STATIC_INCHI=ON `
             -DBUILD_GUI=OFF `
             -DRUN_SWIG=OFF `
             -DPYTHON_BINDINGS=OFF `
