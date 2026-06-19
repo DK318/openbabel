@@ -1,0 +1,167 @@
+# Drop this into `.github/workflows/` of your Open Babel fork.
+#
+# Builds a self-contained, statically-linked `obabel` for every platform we ship,
+# named to match the SPFIT/SPCAT binaries. The single thing that makes it static
+# is `-DBUILD_SHARED=OFF`, which bakes all file formats into the binary instead of
+# loading them as runtime `.so`/`.dll` plugins. Everything else mirrors upstream's
+# openbabel-3-1-1 build_cmake.yml (Release, Eigen, bundled InChI).
+#
+# Run it from the Actions tab (workflow_dispatch); the binaries appear as artifacts.
+
+name: build-static-obabel
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["static-*"]   # e.g. push tag `static-3.1.1` to trigger a build
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- Linux: fully static via musl (Alpine), built natively per arch ----
+  linux:
+    name: ${{ matrix.out }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    out: obabel_linux_amd64 }
+          - { runner: ubuntu-24.04-arm, out: obabel_linux_aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Alpine chroot on the host runner: actions/checkout runs on the host (glibc),
+      # the build runs in musl. Native arch on each runner — no QEMU.
+      - uses: jirutka/setup-alpine@v1
+        with:
+          packages: build-base cmake make git eigen-dev boost-dev boost-static
+
+      - name: Configure & build
+        shell: alpine.sh {0}
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED=OFF \
+            -DWITH_INCHI=ON \
+            -DBUILD_GUI=OFF \
+            -DRUN_SWIG=OFF \
+            -DPYTHON_BINDINGS=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-static"
+          cmake --build build --target obabel -j"$(nproc)"
+          strip build/bin/obabel
+
+      - name: Verify it is static
+        shell: alpine.sh {0}
+        run: |
+          file build/bin/obabel
+          ldd build/bin/obabel 2>&1 | grep -q "not a dynamic executable" \
+            || { echo "ERROR: obabel is not statically linked"; ldd build/bin/obabel; exit 1; }
+
+      - name: Smoke test
+        shell: alpine.sh {0}
+        run: |
+          printf '3\n\nO 0 0 0\nH 0 0 1\nH 1 0 0\n' | ./build/bin/obabel -ixyz -osdf
+          ./build/bin/obabel -iinchi -:'InChI=1S/H2O/h1H2' -oinchikey | grep -q '^XLYOFNOQVPJJNP'
+
+      - name: Rename & upload
+        run: |
+          cp build/bin/obabel "${{ matrix.out }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: ${{ matrix.out }}
+          if-no-files-found: error
+
+  # ---- macOS: no static libc exists; "static" = no plugins, no Homebrew dylibs ----
+  macos:
+    name: ${{ matrix.out }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-13, arch: x86_64, out: obabel_macos_amd64 }   # Intel
+          - { runner: macos-14, arch: arm64,  out: obabel_macos_arm64 }   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: brew install eigen boost   # cmake is preinstalled on the runner
+
+      - name: Configure & build
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED=OFF \
+            -DWITH_INCHI=ON \
+            -DBUILD_GUI=OFF \
+            -DRUN_SWIG=OFF \
+            -DPYTHON_BINDINGS=OFF \
+            -DEIGEN3_INCLUDE_DIR="$(brew --prefix eigen)/include/eigen3" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --build build --target obabel -j"$(sysctl -n hw.ncpu)"
+          strip build/bin/obabel
+
+      - name: Verify only system libs are linked
+        run: |
+          otool -L build/bin/obabel
+          # Fail if any Homebrew dylib leaked into the binary.
+          if otool -L build/bin/obabel | grep -E '/opt/homebrew|/usr/local/'; then
+            echo "ERROR: obabel links a Homebrew dylib"; exit 1
+          fi
+
+      - name: Smoke test
+        run: |
+          printf '3\n\nO 0 0 0\nH 0 0 1\nH 1 0 0\n' | ./build/bin/obabel -ixyz -osdf
+          ./build/bin/obabel -iinchi -:'InChI=1S/H2O/h1H2' -oinchikey | grep -q '^XLYOFNOQVPJJNP'
+
+      - name: Rename & upload
+        run: cp build/bin/obabel "${{ matrix.out }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: ${{ matrix.out }}
+          if-no-files-found: error
+
+  # ---- Windows: 64-bit MSVC, static CRT, Eigen from vcpkg ----
+  windows:
+    name: obabel-x86_64-pc-windows-msvc.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Eigen (vcpkg)
+        run: vcpkg install eigen3:x64-windows
+        shell: pwsh
+
+      - name: Configure & build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_SHARED=OFF `
+            -DWITH_INCHI=ON `
+            -DBUILD_GUI=OFF `
+            -DRUN_SWIG=OFF `
+            -DPYTHON_BINDINGS=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build --config Release --target obabel
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          "3`n`nO 0 0 0`nH 0 0 1`nH 1 0 0`n" | build\bin\Release\obabel.exe -ixyz -osdf
+          $key = build\bin\Release\obabel.exe -iinchi "-:InChI=1S/H2O/h1H2" -oinchikey
+          if (-not ($key -match '^XLYOFNOQVPJJNP')) { throw "unexpected InChIKey: $key" }
+
+      - name: Rename & upload
+        shell: pwsh
+        run: copy build\bin\Release\obabel.exe obabel-x86_64-pc-windows-msvc.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obabel-x86_64-pc-windows-msvc.exe
+          path: obabel-x86_64-pc-windows-msvc.exe
+          if-no-files-found: error
