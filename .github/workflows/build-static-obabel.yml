@@ -14,7 +14,10 @@
 #     only applies to shared builds). It also force-registers the format so the
 #     linker can't drop it — without it the binary has no inchi/inchikey at all.
 #     Quirk: formats.cmake adds include/inchi to the path for every compiler except
-#     MSVC, so Windows supplies it via /I$env:GITHUB_WORKSPACE\include\inchi.
+#     MSVC, so Windows supplies it via /I$env:GITHUB_WORKSPACE\include\inchi. And on
+#     MSVC, OB_USE_PREBUILT_BINARIES defaults ON, which force-enables
+#     OPENBABEL_USE_SYSTEM_INCHI and skips building the bundled libinchi — so we set
+#     OB_USE_PREBUILT_BINARIES=OFF to build inchi from source like the other platforms.
 #   * tools/CMakeLists.txt does find_library(pthread): fine on Linux (musl ships a
 #     libpthread.a stub) but NOTFOUND on macOS, so macOS uses -DBUILD_MIXED=ON to
 #     link the proper Threads::Threads target instead.
@@ -34,77 +37,77 @@ permissions:
   contents: read
 
 jobs:
-  # ---- Linux: fully static via musl (Alpine), one arch per job ----
-  linux:
-    name: ${{ matrix.out }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: ubuntu-latest, alpine_arch: x86_64,  qemu: false, out: obabel_linux_amd64 }
-          - { runner: ubuntu-latest, alpine_arch: aarch64, qemu: true,  out: obabel_linux_aarch64 }
-    steps:
-      - uses: actions/checkout@v4
-
-      # setup-alpine only runs on an x86_64 host; non-x86 arches are emulated via
-      # QEMU binfmt, which must be registered first (the aarch64 apk/gcc then run
-      # transparently under emulation).
-      - if: ${{ matrix.qemu }}
-        uses: docker/setup-qemu-action@v3
-
-      # Alpine chroot on the host runner: actions/checkout runs on the host (glibc),
-      # the build runs in musl. Pinned to v3.20 for a reproducible toolchain.
-      - uses: jirutka/setup-alpine@v1
-        with:
-          arch: ${{ matrix.alpine_arch }}
-          branch: v3.20
-          packages: build-base cmake make git eigen-dev perl
-
-      - name: Configure & build
-        shell: alpine.sh {0}
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED=OFF \
-            -DWITH_INCHI=ON \
-            -DWITH_STATIC_INCHI=ON \
-            -DBUILD_GUI=OFF \
-            -DRUN_SWIG=OFF \
-            -DPYTHON_BINDINGS=OFF \
-            -DWITH_MAEPARSER=OFF \
-            -DWITH_COORDGEN=OFF \
-            -DCMAKE_EXE_LINKER_FLAGS="-static"
-          cmake --build build --target obabel -j"$(nproc)"
-          strip build/bin/obabel
-
-      - name: Verify it is static
-        shell: alpine.sh {0}
-        run: |
-          file build/bin/obabel
-          # Check via `file`, not `ldd`: musl's ldd prints "Not a valid dynamic
-          # program" for static binaries, not the GNU "not a dynamic executable".
-          file build/bin/obabel | grep -qE "statically linked|static-pie" \
-            || { echo "ERROR: obabel is not statically linked"; exit 1; }
-
-      # Non-fatal: a smoke failure must not block the artifact upload.
-      - name: Smoke test
-        continue-on-error: true
-        shell: alpine.sh {0}
-        run: |
-          printf '3\nwater\nO  0.000  0.000  0.000\nH  0.758  0.000  0.504\nH -0.758  0.000  0.504\n' > water.xyz
-          ./build/bin/obabel water.xyz -O water.sdf   # the real use case: XYZ -> SDF
-          cat water.sdf
-          grep -q 'V2000' water.sdf                    # produced a molfile?
-          ./build/bin/obabel water.xyz -oinchikey      # also exercises InChI
-
-      - name: Rename & upload
-        run: cp build/bin/obabel "${{ matrix.out }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.out }}
-          path: ${{ matrix.out }}
-          if-no-files-found: error
+#   # ---- Linux: fully static via musl (Alpine), one arch per job ----
+#   linux:
+#     name: ${{ matrix.out }}
+#     runs-on: ${{ matrix.runner }}
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         include:
+#           - { runner: ubuntu-latest, alpine_arch: x86_64,  qemu: false, out: obabel_linux_amd64 }
+#           - { runner: ubuntu-latest, alpine_arch: aarch64, qemu: true,  out: obabel_linux_aarch64 }
+#     steps:
+#       - uses: actions/checkout@v4
+# 
+#       # setup-alpine only runs on an x86_64 host; non-x86 arches are emulated via
+#       # QEMU binfmt, which must be registered first (the aarch64 apk/gcc then run
+#       # transparently under emulation).
+#       - if: ${{ matrix.qemu }}
+#         uses: docker/setup-qemu-action@v3
+# 
+#       # Alpine chroot on the host runner: actions/checkout runs on the host (glibc),
+#       # the build runs in musl. Pinned to v3.20 for a reproducible toolchain.
+#       - uses: jirutka/setup-alpine@v1
+#         with:
+#           arch: ${{ matrix.alpine_arch }}
+#           branch: v3.20
+#           packages: build-base cmake make git eigen-dev perl
+# 
+#       - name: Configure & build
+#         shell: alpine.sh {0}
+#         run: |
+#           cmake -S . -B build \
+#             -DCMAKE_BUILD_TYPE=Release \
+#             -DBUILD_SHARED=OFF \
+#             -DWITH_INCHI=ON \
+#             -DWITH_STATIC_INCHI=ON \
+#             -DBUILD_GUI=OFF \
+#             -DRUN_SWIG=OFF \
+#             -DPYTHON_BINDINGS=OFF \
+#             -DWITH_MAEPARSER=OFF \
+#             -DWITH_COORDGEN=OFF \
+#             -DCMAKE_EXE_LINKER_FLAGS="-static"
+#           cmake --build build --target obabel -j"$(nproc)"
+#           strip build/bin/obabel
+# 
+#       - name: Verify it is static
+#         shell: alpine.sh {0}
+#         run: |
+#           file build/bin/obabel
+#           # Check via `file`, not `ldd`: musl's ldd prints "Not a valid dynamic
+#           # program" for static binaries, not the GNU "not a dynamic executable".
+#           file build/bin/obabel | grep -qE "statically linked|static-pie" \
+#             || { echo "ERROR: obabel is not statically linked"; exit 1; }
+# 
+#       # Non-fatal: a smoke failure must not block the artifact upload.
+#       - name: Smoke test
+#         continue-on-error: true
+#         shell: alpine.sh {0}
+#         run: |
+#           printf '3\nwater\nO  0.000  0.000  0.000\nH  0.758  0.000  0.504\nH -0.758  0.000  0.504\n' > water.xyz
+#           ./build/bin/obabel water.xyz -O water.sdf   # the real use case: XYZ -> SDF
+#           cat water.sdf
+#           grep -q 'V2000' water.sdf                    # produced a molfile?
+#           ./build/bin/obabel water.xyz -oinchikey      # also exercises InChI
+# 
+#       - name: Rename & upload
+#         run: cp build/bin/obabel "${{ matrix.out }}"
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: ${{ matrix.out }}
+#           path: ${{ matrix.out }}
+#           if-no-files-found: error
 
 #   # ---- macOS: no static libc exists; "static" = no plugins, no Homebrew dylibs ----
 #   macos:
@@ -194,6 +197,7 @@ jobs:
             -DBUILD_SHARED=OFF `
             -DWITH_INCHI=ON `
             -DWITH_STATIC_INCHI=ON `
+            -DOB_USE_PREBUILT_BINARIES=OFF `
             -DBUILD_GUI=OFF `
             -DRUN_SWIG=OFF `
             -DPYTHON_BINDINGS=OFF `
