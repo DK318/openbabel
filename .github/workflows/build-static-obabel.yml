@@ -27,15 +27,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest,    out: obabel_linux_amd64 }
-          - { runner: ubuntu-24.04-arm, out: obabel_linux_aarch64 }
+          - { runner: ubuntu-latest,    alpine_arch: x86_64,  out: obabel_linux_amd64 }
+          - { runner: ubuntu-24.04-arm, alpine_arch: aarch64, out: obabel_linux_aarch64 }
     steps:
       - uses: actions/checkout@v4
 
       # Alpine chroot on the host runner: actions/checkout runs on the host (glibc),
-      # the build runs in musl. Native arch on each runner — no QEMU.
+      # the build runs in musl. setup-alpine defaults to x86_64, so the arch must be
+      # set explicitly or the arm runner tries to exec an x86_64 apk. Native — no QEMU.
       - uses: jirutka/setup-alpine@v1
         with:
+          arch: ${{ matrix.alpine_arch }}
           packages: build-base cmake make git eigen-dev boost-dev boost-static
 
       - name: Configure & build
@@ -48,6 +50,7 @@ jobs:
             -DBUILD_GUI=OFF \
             -DRUN_SWIG=OFF \
             -DPYTHON_BINDINGS=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_EXE_LINKER_FLAGS="-static"
           cmake --build build --target obabel -j"$(nproc)"
           strip build/bin/obabel
@@ -99,6 +102,7 @@ jobs:
             -DBUILD_GUI=OFF \
             -DRUN_SWIG=OFF \
             -DPYTHON_BINDINGS=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DEIGEN3_INCLUDE_DIR="$(brew --prefix eigen)/include/eigen3" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
@@ -137,29 +141,39 @@ jobs:
         run: vcpkg install eigen3:x64-windows
         shell: pwsh
 
+      # Don't pin the VS generator — the runner image now ships VS 18, so the
+      # "Visual Studio 17 2022" generator finds nothing. Set up the x64 MSVC
+      # environment (vswhere -latest) and build with Ninja, which is generator-
+      # version-agnostic and preinstalled on the runner.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Configure & build
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_SHARED=OFF `
             -DWITH_INCHI=ON `
             -DBUILD_GUI=OFF `
             -DRUN_SWIG=OFF `
             -DPYTHON_BINDINGS=OFF `
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
-          cmake --build build --config Release --target obabel
+          cmake --build build --target obabel
 
       - name: Smoke test
         shell: pwsh
         run: |
-          "3`n`nO 0 0 0`nH 0 0 1`nH 1 0 0`n" | build\bin\Release\obabel.exe -ixyz -osdf
-          $key = build\bin\Release\obabel.exe -iinchi "-:InChI=1S/H2O/h1H2" -oinchikey
+          "3`n`nO 0 0 0`nH 0 0 1`nH 1 0 0`n" | build\bin\obabel.exe -ixyz -osdf
+          $key = build\bin\obabel.exe -iinchi "-:InChI=1S/H2O/h1H2" -oinchikey
           if (-not ($key -match '^XLYOFNOQVPJJNP')) { throw "unexpected InChIKey: $key" }
 
       - name: Rename & upload
         shell: pwsh
-        run: copy build\bin\Release\obabel.exe obabel-x86_64-pc-windows-msvc.exe
+        run: copy build\bin\obabel.exe obabel-x86_64-pc-windows-msvc.exe
       - uses: actions/upload-artifact@v4
         with:
           name: obabel-x86_64-pc-windows-msvc.exe
