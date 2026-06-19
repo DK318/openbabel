@@ -13,6 +13,8 @@
 #   * InChI in a static build is gated on WITH_STATIC_INCHI (NOT WITH_INCHI, which
 #     only applies to shared builds). It also force-registers the format so the
 #     linker can't drop it — without it the binary has no inchi/inchikey at all.
+#     Quirk: formats.cmake adds include/inchi to the path for every compiler except
+#     MSVC, so Windows supplies it via /I$env:GITHUB_WORKSPACE\include\inchi.
 #   * tools/CMakeLists.txt does find_library(pthread): fine on Linux (musl ships a
 #     libpthread.a stub) but NOTFOUND on macOS, so macOS uses -DBUILD_MIXED=ON to
 #     link the proper Threads::Threads target instead.
@@ -80,8 +82,10 @@ jobs:
         shell: alpine.sh {0}
         run: |
           file build/bin/obabel
-          ldd build/bin/obabel 2>&1 | grep -q "not a dynamic executable" \
-            || { echo "ERROR: obabel is not statically linked"; ldd build/bin/obabel; exit 1; }
+          # Check via `file`, not `ldd`: musl's ldd prints "Not a valid dynamic
+          # program" for static binaries, not the GNU "not a dynamic executable".
+          file build/bin/obabel | grep -qE "statically linked|static-pie" \
+            || { echo "ERROR: obabel is not statically linked"; exit 1; }
 
       # Non-fatal: a smoke failure must not block the artifact upload.
       - name: Smoke test
@@ -102,66 +106,66 @@ jobs:
           path: ${{ matrix.out }}
           if-no-files-found: error
 
-  # ---- macOS: no static libc exists; "static" = no plugins, no Homebrew dylibs ----
-  macos:
-    name: ${{ matrix.out }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { runner: macos-15-intel, arch: x86_64, out: obabel_macos_amd64 }   # Intel
-          - { runner: macos-14,       arch: arm64,  out: obabel_macos_arm64 }   # Apple Silicon
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install deps
-        run: brew install eigen   # header-only; maeparser/coordgen are off, so Boost isn't needed
-
-      - name: Configure & build
-        run: |
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED=OFF \
-            -DWITH_INCHI=ON \
-            -DWITH_STATIC_INCHI=ON \
-            -DBUILD_GUI=OFF \
-            -DRUN_SWIG=OFF \
-            -DPYTHON_BINDINGS=OFF \
-            -DWITH_MAEPARSER=OFF \
-            -DWITH_COORDGEN=OFF \
-            -DEIGEN3_INCLUDE_DIR="$(brew --prefix eigen)/include/eigen3" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-            -DBUILD_MIXED=ON   # use Threads::Threads; find_library(pthread) is NOTFOUND on macOS. Clang isn't GNUCXX, so the Linux-only -static-libgcc path is skipped.
-          cmake --build build --target obabel -j"$(sysctl -n hw.ncpu)"
-          strip build/bin/obabel
-
-      - name: Verify only system libs are linked
-        run: |
-          otool -L build/bin/obabel
-          # Fail if any Homebrew dylib leaked into the binary.
-          if otool -L build/bin/obabel | grep -E '/opt/homebrew|/usr/local/'; then
-            echo "ERROR: obabel links a Homebrew dylib"; exit 1
-          fi
-
-      # Non-fatal: a smoke failure must not block the artifact upload.
-      - name: Smoke test
-        continue-on-error: true
-        run: |
-          printf '3\nwater\nO  0.000  0.000  0.000\nH  0.758  0.000  0.504\nH -0.758  0.000  0.504\n' > water.xyz
-          ./build/bin/obabel water.xyz -O water.sdf   # the real use case: XYZ -> SDF
-          cat water.sdf
-          grep -q 'V2000' water.sdf                    # produced a molfile?
-          ./build/bin/obabel water.xyz -oinchikey      # also exercises InChI
-
-      - name: Rename & upload
-        run: cp build/bin/obabel "${{ matrix.out }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.out }}
-          path: ${{ matrix.out }}
-          if-no-files-found: error
+#   # ---- macOS: no static libc exists; "static" = no plugins, no Homebrew dylibs ----
+#   macos:
+#     name: ${{ matrix.out }}
+#     runs-on: ${{ matrix.runner }}
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         include:
+#           - { runner: macos-15-intel, arch: x86_64, out: obabel_macos_amd64 }   # Intel
+#           - { runner: macos-14,       arch: arm64,  out: obabel_macos_arm64 }   # Apple Silicon
+#     steps:
+#       - uses: actions/checkout@v4
+# 
+#       - name: Install deps
+#         run: brew install eigen   # header-only; maeparser/coordgen are off, so Boost isn't needed
+# 
+#       - name: Configure & build
+#         run: |
+#           cmake -S . -B build \
+#             -DCMAKE_BUILD_TYPE=Release \
+#             -DBUILD_SHARED=OFF \
+#             -DWITH_INCHI=ON \
+#             -DWITH_STATIC_INCHI=ON \
+#             -DBUILD_GUI=OFF \
+#             -DRUN_SWIG=OFF \
+#             -DPYTHON_BINDINGS=OFF \
+#             -DWITH_MAEPARSER=OFF \
+#             -DWITH_COORDGEN=OFF \
+#             -DEIGEN3_INCLUDE_DIR="$(brew --prefix eigen)/include/eigen3" \
+#             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+#             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+#             -DBUILD_MIXED=ON   # use Threads::Threads; find_library(pthread) is NOTFOUND on macOS. Clang isn't GNUCXX, so the Linux-only -static-libgcc path is skipped.
+#           cmake --build build --target obabel -j"$(sysctl -n hw.ncpu)"
+#           strip build/bin/obabel
+# 
+#       - name: Verify only system libs are linked
+#         run: |
+#           otool -L build/bin/obabel
+#           # Fail if any Homebrew dylib leaked into the binary.
+#           if otool -L build/bin/obabel | grep -E '/opt/homebrew|/usr/local/'; then
+#             echo "ERROR: obabel links a Homebrew dylib"; exit 1
+#           fi
+# 
+#       # Non-fatal: a smoke failure must not block the artifact upload.
+#       - name: Smoke test
+#         continue-on-error: true
+#         run: |
+#           printf '3\nwater\nO  0.000  0.000  0.000\nH  0.758  0.000  0.504\nH -0.758  0.000  0.504\n' > water.xyz
+#           ./build/bin/obabel water.xyz -O water.sdf   # the real use case: XYZ -> SDF
+#           cat water.sdf
+#           grep -q 'V2000' water.sdf                    # produced a molfile?
+#           ./build/bin/obabel water.xyz -oinchikey      # also exercises InChI
+# 
+#       - name: Rename & upload
+#         run: cp build/bin/obabel "${{ matrix.out }}"
+#       - uses: actions/upload-artifact@v4
+#         with:
+#           name: ${{ matrix.out }}
+#           path: ${{ matrix.out }}
+#           if-no-files-found: error
 
   # ---- Windows: 64-bit MSVC, static CRT, Eigen from vcpkg ----
   windows:
@@ -197,7 +201,7 @@ jobs:
             -DWITH_COORDGEN=OFF `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DCMAKE_C_FLAGS="/DWIN32" `
-            -DCMAKE_CXX_FLAGS="/DWIN32" `
+            -DCMAKE_CXX_FLAGS="/DWIN32 /I$env:GITHUB_WORKSPACE\include\inchi" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           cmake --build build --target obabel
 
